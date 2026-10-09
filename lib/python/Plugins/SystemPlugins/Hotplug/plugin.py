@@ -8,6 +8,7 @@ from enigma import getDeviceDB, eTimer
 
 from Components.Console import Console
 from Components.Harddisk import harddiskmanager, bytesToHumanReadable, getProcMounts
+from Components.SystemInfo import MODEL
 from Plugins.Plugin import PluginDescriptor
 from Screens.MessageBox import ModalMessageBox
 from Tools.Directories import fileReadLines, fileWriteLines
@@ -117,7 +118,11 @@ class HotPlugManager:
 			usedMountPoints = mountPoints + [x[1] for x in fstabEntries]
 			mountPoint = "/media/usb"
 			mmcPrefix = "/dev/mmcblk1p"
-			mountPointDevice = DEVNAME.replace("/dev/", "/media/")
+			if DEVNAME.startswith(mmcPrefix) and DEVNAME[len(mmcPrefix):].isdigit() and MODEL in ("dm900", "dm920"):
+				partition = DEVNAME[len(mmcPrefix):]
+				mountPointDevice = "/media/mmc" if partition == "1" else f"/media/mmc{partition}"
+			else:
+				mountPointDevice = DEVNAME.replace("/dev/", "/media/")
 			mountPointHdd = None if "/media/hdd" in usedMountPoints else "/media/hdd"
 			knownDevices = fileReadLines("/etc/udev/known_devices", default=[])
 			knownDevice = ""

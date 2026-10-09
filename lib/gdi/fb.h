@@ -29,6 +29,11 @@ public:
 #else
 public:
 	unsigned char *lfb;
+#ifdef CONFIG_ION
+	int m_accel_fd;
+	unsigned long m_accel_phys_addr;
+	unsigned long getAccelPhysAddr() { return m_accel_phys_addr; }
+#endif
 	void enableManualBlit();
 	void disableManualBlit();
 	int showConsole(int state);

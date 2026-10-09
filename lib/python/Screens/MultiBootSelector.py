@@ -19,7 +19,7 @@ from Screens.Screen import Screen, ScreenSummary
 from Screens.Standby import QUIT_REBOOT, QUIT_RESTART, TryQuitMainloop
 from Screens.Setup import Setup
 from Tools.BoundFunction import boundFunction
-from Tools.Directories import copyfile, fileReadLine, fileReadLines, fileWriteLine
+from Tools.Directories import copyfile, fileReadLine, fileWriteLine
 from Tools.Multiboot import emptySlot, GetImagelist, GetCurrentImageMode, restoreSlots
 
 ACTION_SELECT = 0
@@ -75,9 +75,9 @@ class MultiBootSelector(Screen, HelpableScreen):
 		mode = GetCurrentImageMode() or 0
 		print("[MultiBootSelector] reboot0 slot:", currentimageslot)
 		current = "  %s" % _("(Current)")
-		slotSingle = _("Slot %s %s%s: %s%s")
-		slotMulti = _("Slot %s %s%s: %s - %s mode%s")
-		slotRecov = _("%s: Boot to access Recovery Options%s")
+		slotRecov = _("%s%s - Select to access recovery options")
+		slotSingle = _("Slot%s %s %s: %s%s")
+		slotMulti = _("Slot%s %s %s: %s - %s mode%s")
 		if self.imagedict:
 			for x in sorted(self.imagedict.keys()):
 				if self.imagedict[x]["imagename"] == _("Deleted image"):
@@ -120,7 +120,7 @@ class MultiBootSelector(Screen, HelpableScreen):
 				open(join(self.tmp_dir, "STARTUP"), "w").write(f)
 		else:
 			copyfile(join(self.tmp_dir, SystemInfo["canMultiBoot"][slot]["startupfile"]), join(self.tmp_dir, "STARTUP"))
-		if SystemInfo["HasMultibootMTD"] or SystemInfo["HasMultibootFlags"]:
+		if SystemInfo["HasMultibootMTD"]:
 			with open('/dev/block/by-name/flag', 'wb') as f:
 				f.write(struct.pack("B", int(slot)))
 		self.cancel(QUIT_REBOOT)
@@ -315,13 +315,28 @@ class ChkrootInit(Screen):
 		self["description"].setText("%s\n\n%s" % (_("Chkroot MultiBoot Initialization in progress!"), self.descriptionSuffix))
 		device = "/dev/block/by-name/others"
 		mountpoint = "/boot"
-		rootMap = [
-			(MTDROOTFS, "linuxrootfs1"),
-			(MTDROOTFS, "linuxrootfs1"),
-			(MTDROOTFS, "linuxrootfs2"),
-			(MTDROOTFS, "linuxrootfs3"),
-			(MTDROOTFS, "linuxrootfs4")
-		]
+		if BOXTYPE in ("dm900", "dm920"):  # mmcblk0p1 = 63488 mmcblk0p2 = 2031616 mmcblk0p3 = 13172703
+			with open("/sys/block/mmcblk0/mmcblk0p1/size", "r") as fd:
+				sectors = int(fd.read().strip())
+			rootMap = [
+				("mmcblk0p2", "linuxrootfs1"),
+				("mmcblk0p2", "linuxrootfs1")
+			]
+			rootMap.append(("mmcblk0p3" if sectors < 2097152 else "mmcblk0p2", "linuxrootfs2"))
+			rootMap.extend([
+				("mmcblk0p3", "linuxrootfs3"),
+				("mmcblk0p3", "linuxrootfs4"),
+				("mmcblk0p3", "linuxrootfs5"),
+				("mmcblk0p3", "linuxrootfs6")
+			])
+		else:
+			rootMap = [
+				(MTDROOTFS, "linuxrootfs1"),
+				(MTDROOTFS, "linuxrootfs1"),
+				(MTDROOTFS, "linuxrootfs2"),
+				(MTDROOTFS, "linuxrootfs3"),
+				(MTDROOTFS, "linuxrootfs4")
+			]
 
 		cmdList = [
 			f"mkfs.vfat -F 32 -n CHKROOT {device}",

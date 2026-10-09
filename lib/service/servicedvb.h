@@ -370,7 +370,7 @@ protected:
 	void cleanupSoftwareDescrambling();
 
 	// Aggressive mode: force release of the HW-descrambler slot at service
-	// stop. Workaround for drivers that ignore CA_SET_PID(pid, -1).
+	// stop. Workaround for drivers (dm900) that ignore CA_SET_PID(pid, -1).
 	void resetHwDescramblerSlot();
 
 	// Audio cache helper

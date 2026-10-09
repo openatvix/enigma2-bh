@@ -73,6 +73,13 @@ gdiinclude_HEADERS += \
 	gdi/egl/shader/gtexture_shader.h
 endif
 
+if HAVE_DREAMBOX_EGL
+gdi_libenigma_gdi_a_SOURCES += \
+	gdi/egl/platform/dreambox/dreambox_window_provider.cpp
+gdiinclude_HEADERS += \
+	gdi/egl/platform/dreambox/dreambox_window_provider.h
+endif
+
 if HAVE_GBQUAD_EGL
 gdi_libenigma_gdi_a_SOURCES += \
 	gdi/egl/platform/gbquad/gbquad_window_provider.cpp

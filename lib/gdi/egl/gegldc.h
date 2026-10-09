@@ -505,8 +505,8 @@ public:
 	// the progress-screen flicker/corruption seen after gEGLDC's earlier
 	// fix restored real triple-buffered presentPixmap() rotation (see
 	// project memory) - before that fix a leftover forceSingleBuffer flag
-	// meant some stb's never exercised multi-page presentation, so the race was
-	// latent. Forwarding to the same fbClass singleton WindowProvider
+	// meant DM900 never exercised multi-page presentation, so the race was
+	// latent. Forwarding to the same fbClass singleton DreamboxWindowProvider
 	// already uses (see its init()) makes gEGLDC honor the same lock every
 	// other backend does, with no ofgwrite or Python-side change needed.
 	int islocked() const override;

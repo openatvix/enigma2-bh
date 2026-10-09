@@ -69,7 +69,7 @@ class BoxInformation:
 
 BoxInfo = BoxInformation()
 
-# "kernel" from enigma.info may not be faithful with what is expected. e.g. osmio4k+ should be "5.15.0"
+# "kernel" from enigma.info may not be faithful with what is expected. e.g. osmio4k should be "5.15.0"
 # but enigma.info shows "5.15" which reflects "PREFERRED_VERSION_linux-edision". But we want the version
 # to refect that found in "${STAGING_KERNEL_BUILDDIR}/kernel-abiversion" which is the version used in the
 # package names from the feeds. Therefore we will force the output of BoxInfo.getItem("kernel") to the
@@ -81,7 +81,9 @@ BoxInfo.boxInfo["kernel"] = Versions.split(" ", 3)[2].split("-", 1)[0].strip() i
 SystemInfo = BoxInfo.boxInfo
 
 
-if BoxInfo.getItem("model") in ("h7", "h17"):
+if BoxInfo.getItem("model") in ("dm900", "dm920", "et13000"):
+	CHIPSET = "7252s"
+elif BoxInfo.getItem("model") in ("hd51", "vs1500", "h7", "h17"):
 	CHIPSET = "7251s"
 else:
 	chipset = fileReadLine("/proc/stb/info/chipset")
@@ -167,6 +169,7 @@ def setRCFile(source):
 
 
 SystemInfo["MTDBLACK"] = ""  # HDD device set in Harddisk.py
+SystemInfo["DMRecovery"] = MODEL in ("dm900", "dm920") and fileExists("/proc/stb/fp/boot_mode")
 
 
 def getNumVideoDecoders():
@@ -210,8 +213,8 @@ for cislot in range(0, SystemInfo["CommonInterface"]):
 	SystemInfo[f"CI{cislot}RelevantPidsRoutingSupport"] = fileCheck(f"/proc/stb/tsmux/ci{cislot}_relevant_pids_routing")
 SystemInfo["NumVideoDecoders"] = getNumVideoDecoders()
 SystemInfo["Udev"] = not fileExists("/dev/.devfsd")
-SystemInfo["HasFullHDSkinSupport"] = True
-SystemInfo["PIPAvailable"] = SystemInfo["NumVideoDecoders"] > 1
+SystemInfo["HasFullHDSkinSupport"] = MODEL not in ("vipertwin",)
+SystemInfo["PIPAvailable"] = MODEL not in ("i55plus") and SystemInfo["NumVideoDecoders"] > 1
 SystemInfo["CanMeasureFrontendInputPower"] = eDVBResourceManager.getInstance().canMeasureFrontendInputPower()
 SystemInfo["12V_Output"] = Misc_Options.getInstance().detected_12V_output()
 SystemInfo["ZapMode"] = fileCheck("/proc/stb/video/zapmode") or fileCheck("/proc/stb/video/zapping_mode")
@@ -222,7 +225,9 @@ SystemInfo["ConfigDisplay"] = SystemInfo["FrontpanelDisplay"] and SystemInfo["di
 SystemInfo["LCDSKINSetup"] = pathExists("/usr/share/enigma2/display") and not SystemInfo["7segment"]
 SystemInfo["OledDisplay"] = fileExists("/dev/dbox/oled0")
 SystemInfo["LcdDisplay"] = fileExists("/dev/dbox/lcd0")
-SystemInfo["HasNoDisplay"] = False
+SystemInfo["LCDsymbol_hdd"] = MODEL in ("mutant51",) and fileCheck("/proc/stb/lcd/symbol_hdd")
+SystemInfo["HasNoDisplay"] = BOXTYPE in ("et4x00", "et5x00", "et6x00", "gb800se", "gb800solo", "gbx34k", "iqonios300hd", "mbmicro", "sf128", "sf138", "tmsingle", "tmnano2super", "tmnanose", "tmnanoseplus", "tmnanosem2", "tmnanosem2plus", "tmnanosecombo", "vusolo")
+SystemInfo["DisplayLED"] = MODEL in ("gb800se", "gb800solo", "gbx1", "gbx2", "gbx3", "gbx3h")
 SystemInfo["LEDButtons"] = False  # MODEL == "vuultimo", For some reason this causes a cpp crash on vuultimo (which we no longer build). The cause needs investigating or the dead code in surrounding modules that this change causes should be removed.
 SystemInfo["Fan"] = fileCheck("/proc/stb/fp/fan")
 SystemInfo["FanPWM"] = SystemInfo["Fan"] and fileCheck("/proc/stb/fp/fan_pwm")
@@ -236,18 +241,18 @@ SystemInfo["LedSuspendColor"] = fileExists("/proc/stb/fp/ledsuspendledcolor")
 SystemInfo["Power24x7On"] = fileExists("/proc/stb/fp/power4x7on")
 SystemInfo["Power24x7Standby"] = fileExists("/proc/stb/fp/power4x7standby")
 SystemInfo["Power24x7Suspend"] = fileExists("/proc/stb/fp/power4x7suspend")
-SystemInfo["WakeOnLAN"] = fileCheck("/proc/stb/power/wol") or fileCheck("/proc/stb/fp/wol")
+SystemInfo["WakeOnLAN"] = MODEL not in ("et8000", "et10000") and fileCheck("/proc/stb/power/wol") or fileCheck("/proc/stb/fp/wol")
 SystemInfo["hasHdmiCec"] = fileExists("/dev/hdmi_cec") or fileExists("/dev/misc/hdmi_cec0")
-SystemInfo["HasExternalPIP"] = fileCheck("/proc/stb/vmpeg/1/external")
+SystemInfo["HasExternalPIP"] = MODEL not in ("et9x00", "et6x00", "et5x00") and fileCheck("/proc/stb/vmpeg/1/external")
 SystemInfo["VideoDestinationConfigurable"] = fileExists("/proc/stb/vmpeg/0/dst_left")
 SystemInfo["hasPIPVisibleProc"] = fileCheck("/proc/stb/vmpeg/1/visible")
-SystemInfo["VFD_scroll_repeats"] = not SystemInfo["7segment"] and fileCheck("/proc/stb/lcd/scroll_repeats")
-SystemInfo["VFD_scroll_delay"] = not SystemInfo["7segment"] and fileCheck("/proc/stb/lcd/scroll_delay")
-SystemInfo["VFD_initial_scroll_delay"] = not SystemInfo["7segment"] and fileCheck("/proc/stb/lcd/initial_scroll_delay")
-SystemInfo["VFD_final_scroll_delay"] = not SystemInfo["7segment"] and fileCheck("/proc/stb/lcd/final_scroll_delay")
+SystemInfo["VFD_scroll_repeats"] = not SystemInfo["7segment"] and MODEL not in ("et8500",) and fileCheck("/proc/stb/lcd/scroll_repeats")
+SystemInfo["VFD_scroll_delay"] = not SystemInfo["7segment"] and MODEL not in ("et8500",) and fileCheck("/proc/stb/lcd/scroll_delay")
+SystemInfo["VFD_initial_scroll_delay"] = not SystemInfo["7segment"] and MODEL not in ("et8500",) and fileCheck("/proc/stb/lcd/initial_scroll_delay")
+SystemInfo["VFD_final_scroll_delay"] = not SystemInfo["7segment"] and MODEL not in ("et8500",) and fileCheck("/proc/stb/lcd/final_scroll_delay")
 SystemInfo["LcdLiveTV"] = fileCheck("/proc/stb/fb/sd_detach") or fileCheck("/proc/stb/lcd/live_enable")
 SystemInfo["LCDMiniTV"] = fileExists("/proc/stb/lcd/mode")
-SystemInfo["LCDMiniTVPiP"] = SystemInfo["LCDMiniTV"]
+SystemInfo["LCDMiniTVPiP"] = SystemInfo["LCDMiniTV"] and MODEL != "gb800ueplus"
 SystemInfo["LcdPowerOn"] = fileExists("/proc/stb/power/vfd")
 SystemInfo["FastChannelChange"] = False
 SystemInfo["Blindscan_t2_available"] = fileCheck("/proc/stb/info/vumodel") and MODEL.startswith("vu")
@@ -258,16 +263,16 @@ SystemInfo["UseServiceHisilicon"] = MODEL in ("pulse4k", "pulse4kmini")  # Allow
 SystemInfo["HasTranscoding"] = pathExists("/proc/stb/encoder/0") or fileCheck("/dev/bcm_enc0")
 SystemInfo["HasH265Encoder"] = fileHas("/proc/stb/encoder/0/vcodec_choices", "h265")
 SystemInfo["CanNotDoSimultaneousTranscodeAndPIP"] = MODEL in ("vusolo4k", "gb7252")
-SystemInfo["hasXcoreVFD"] = False
+SystemInfo["hasXcoreVFD"] = MODEL in ("osmega", "spycat4k", "spycat4kmini", "spycat4kcomb") and fileCheck(f"/sys/module/brcmstb_{MODEL}/parameters/pt6302_cgram")
 SystemInfo["HasHDMIin"] = SystemInfo["hdmifhdin"] or SystemInfo["hdmihdin"]
 SystemInfo["HDMIinPiP"] = SystemInfo["HasHDMIin"] and BRAND != "dreambox"
 SystemInfo["CanHDMIinRecord"] = fileExists("/proc/stb/encoder/0/decoder")
-SystemInfo["Has24hz"] = fileCheck("/proc/stb/video/videomode_24hz") or MODEL in ("h7", "h17")
-SystemInfo["canMode12"] = MODEL in ("h7") and ("brcm_cma=440M@328M brcm_cma=192M@768M", "brcm_cma=520M@248M brcm_cma=200M@768M")
+SystemInfo["Has24hz"] = fileCheck("/proc/stb/video/videomode_24hz") or MODEL in ("h7")
+SystemInfo["canMode12"] = MODEL in ("hd51", "h7") and ("brcm_cma=440M@328M brcm_cma=192M@768M", "brcm_cma=520M@248M brcm_cma=200M@768M")
 SystemInfo["HasMMC"] = fileHas("/proc/cmdline", "root=/dev/mmcblk") or "mmcblk" in SystemInfo["mtdrootfs"]
-SystemInfo["HasH9SD"] = MODEL in ("h9") and pathExists("/dev/mmcblk0p1")
-SystemInfo["HasSDnomount"] = MODEL in ("h9") and (False, "none") or MODEL in ("gb7252", "h9combose", "h9twinse", "h11", "multiboxpro", "pulse4k", "pulse4kmini", "vuduo4klite") and (True, "mmcblk0")
-SystemInfo["CanProc"] = MODEL in ("vuduo4klite",) or (SystemInfo["HasMMC"] and BRAND != "vuplus")
+SystemInfo["HasH9SD"] = MODEL in ("h9", "i55plus") and pathExists("/dev/mmcblk0p1")
+SystemInfo["HasSDnomount"] = MODEL in ("h9", "i55plus") and (False, "none") or MODEL in ("h9combo", "h9combose", "h9se", "h9twin", "h9twinse", "h11", "multibox", "multiboxpro", "pulse4k", "pulse4kmini", "gb7252", "vuduo4klite") and (True, "mmcblk0")
+SystemInfo["CanProc"] = MODEL in ("vuduo4klite") or (SystemInfo["HasMMC"] and BRAND != "vuplus")
 SystemInfo["Canaudiosource"] = fileCheck("/proc/stb/hdmi/audio_source")
 SystemInfo["Can3DSurround"] = fileHas("/proc/stb/audio/3d_surround_choices", "none") and fileCheck("/proc/stb/audio/3d_surround")
 SystemInfo["Can3DSpeaker"] = fileHas("/proc/stb/audio/3d_surround_speaker_position_choices", "center") and fileCheck("/proc/stb/audio/3d_surround_speaker_position")
@@ -289,7 +294,6 @@ SystemInfo["havecolorimetry"] = fileCheck("/proc/stb/video/hdmi_colorimetry")
 SystemInfo["havecolorimetrychoices"] = fileCheck("/proc/stb/video/hdmi_colorimetry_choices")
 SystemInfo["havehdmicolordepth"] = fileCheck("/proc/stb/video/hdmi_colordepth")
 SystemInfo["havehdmicolordepthchoices"] = fileCheck("/proc/stb/video/hdmi_colordepth_choices")
-SystemInfo["havehdmihdrosd"] = fileCheck("/proc/stb/video/hdmi_hdr_osd")
 SystemInfo["havehdmihdrtype"] = fileCheck("/proc/stb/video/hdmi_hdrtype")
 SystemInfo["havehdmihdrosd"] = bool(fileReadLine("/proc/stb/video/hdmi_hdr_osd", default=None))
 SystemInfo["HDRSupport"] = fileExists("/proc/stb/hdmi/hlg_support_choices")
@@ -301,7 +305,10 @@ SystemInfo["hasRCA"] = SystemInfo["rca"]
 SystemInfo["hasScart"] = SystemInfo["scart"]
 SystemInfo["hasScartYUV"] = SystemInfo["scartyuv"]
 SystemInfo["hasYUV"] = SystemInfo["yuv"]
-SystemInfo["scalerSharpnessWorkaround"] = False
+SystemInfo["needsVideoJudderDriverFix"] = BOXTYPE in ("gbquad4kpro", "vuduo4klite")
+SystemInfo["scalerSharpnessWorkaround"] = BOXTYPE in ("gbquad", "gbquadplus")
+SystemInfo["dmVideoRates"] = MODEL in ("dm900", "dm920")
+
 SystemInfo["VideoModes"] = CHIPSET.replace("hi", "") in (  # 2160p and 1080p capable hardware...
 	"5272s", "7251", "7251s", "7252", "7252s", "7278", "7366", "7376", "7444s", "72604", "3798cv200", "3798mv200", "3798mv200advca", "3798mv200h", "3798mv300"
 ) and (
@@ -316,9 +323,9 @@ SystemInfo["VideoModes"] = CHIPSET.replace("hi", "") in (  # 2160p and 1080p cap
 	["720p", "1080i", "576p", "576i", "480p", "480i"],  # Normal modes.
 	{"720p", "1080i"}  # Widescreen modes.
 )
-SystemInfo["FbcTunerPowerAlwaysOn"] = MODEL in ("vusolo4k", "vuduo4k", "vuduo4kse", "vuultimo4k", "vuuno4k", "vuuno4kse")
+SystemInfo["FbcTunerPowerAlwaysOn"] = MODEL in ("vusolo4k", "vuduo4k", "vuduo4kse", "vuultimo4k", "vuuno4k", "vuuno4kse", "dm900", "dm920")
 SystemInfo["HasPhysicalLoopthrough"] = ["Vuplus DVB-S NIM(AVL2108)", "GIGA DVB-S2 NIM (Internal)"]
-SystemInfo["HasFBCtuner"] = ["Vuplus DVB-C NIM(BCM3158)", "Vuplus DVB-C NIM(BCM3148)", "Vuplus DVB-S NIM(7376 FBC)", "Vuplus DVB-S NIM(45308X FBC)", "Vuplus DVB-S NIM(45208 FBC)", "DVB-S2 NIM(45208 FBC)", "DVB-S2X NIM(45308X FBC)", "DVB-S2 NIM(45308 FBC)", "DVB-C NIM(3128 FBC)", "BCM45208", "BCM45308X", "BCM3158"]
+SystemInfo["HasFBCtuner"] = ["Vuplus DVB-C NIM(BCM3158)", "Vuplus DVB-C NIM(BCM3148)", "Vuplus DVB-S NIM(7376 FBC)", "Vuplus DVB-S NIM(45308X FBC)", "Vuplus DVB-S NIM(45208 FBC)", "DVB-S2 NIM(45208 FBC)", "DVB-S2X NIM(45308X FBC)", "DVB-S2 NIM(45308 FBC)", "DVB-C NIM(3128 FBC)", "BCM45208", "BCM45308X", "BCM45308X FBC", "BCM3158"]
 SystemInfo["FCCactive"] = False
 
 # The remote names used in the code below are the names used by oe-mirrors/branding-module,
@@ -328,7 +335,7 @@ SystemInfo["FCCactive"] = False
 SystemInfo["rc_model"] = rc_model.getRcFolder()
 SystemInfo["mapKeyInfoToEpgFunctions"] = SystemInfo["rc_model"] in ("vu", "vu2", "vu3", "vu4")  # due to button limitations of the remote control
 SystemInfo["hasDuplicateVideoAndPvrButtons"] = SystemInfo["rc_model"] in ("edision3",)  # Allow multiple functions only if both buttons are present
-SystemInfo["toggleTvRadioButtonEvents"] = SystemInfo["rc_model"] in ("abcom", "gb3", "gb4", "gb5", "gb6", "gb7", "octagon1", "octagon3", "octagon4", "qviart5", "qviart7", "sf8008", "uclan1")  # due to button limitations of the remote control
+SystemInfo["toggleTvRadioButtonEvents"] = SystemInfo["rc_model"] in ("abcom", "ax4", "beyonwiz1", "beyonwiz2", "gb3", "gb4", "gb5", "gb6", "gb7", "octagon1", "octagon3", "octagon4", "qviart5", "qviart7", "sf8008", "sf8008m", "uclan1", "uniboxhde")  # due to button limitations of the remote control
 SystemInfo["rc_default"] = SystemInfo["rc_model"] in ("dmm0", )
 
 # If any remotes are missing from oe-mirrors/branding-module they should be added. The

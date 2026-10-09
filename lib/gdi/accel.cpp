@@ -443,7 +443,7 @@ int gAccel::accelAlloc(gUnmanagedSurface* surface)
 		}
 	}
 
-	eTrace("[gAccel] alloc failed");
+	eDebug("[gAccel] alloc failed");
 	return -3;
 }
 

@@ -44,6 +44,10 @@ if HAVE_COLORLCD220
 SUBDIRS += display220
 endif
 
+if HAVE_COLORLCD390
+SUBDIRS += display390
+endif
+
 if HAVE_COLORLCD400
 ## Experimental. Run display480 skin instead of display400 as should work at multiple resolutions
 ## SUBDIRS += display400

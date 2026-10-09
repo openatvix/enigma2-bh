@@ -237,7 +237,7 @@ gSurface::gSurface(int width, int height, int _bpp, int accel):
 		gAccel::getInstance()->hasAccelMemory())
 	{
 		if (gAccel::getInstance()->accelAlloc(this) != 0)
-				eTrace("[gSurface] ERROR: accelAlloc failed");
+				eDebug("[gSurface] ERROR: accelAlloc failed");
 	}
 	if (!data)
 	{
@@ -2166,7 +2166,7 @@ void gPixmap::blit(const gPixmap& src, const eRect& _pos, const gRegion& clip, i
 		}
 		if (accel) {
 			/* we have hardware acceleration for this blit operation */
-#if defined(FORCE_ALPHABLENDING_ACCELERATION) && defined(HWDUAL)
+#if defined(FORCE_ALPHABLENDING_ACCELERATION) && defined(DREAMBOX)
 			/* Hardware blitting is unreliable on these boxes even for
 			 * plain (non-alpha) blits -- not just alpha blending -- so
 			 * always fall back to software regardless of the requested
