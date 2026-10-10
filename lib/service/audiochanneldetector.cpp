@@ -564,7 +564,7 @@ namespace
 
 			// Atmos (JOC) uses exactly two addbsi bytes: the extension
 			// flag (LSB of byte 0) then complexity_index_type_a (byte 1,
-			// non-zero and small). Checking just the flag bit also
+			// non-zero). Checking just the flag bit also
 			// matches unrelated addbsi payloads and misaligned walks.
 			if (addbsil == 1)
 			{
@@ -572,7 +572,7 @@ namespace
 				if (!bits.bad && bits.read(1) != 0)
 				{
 					unsigned int complexity = bits.read(8);
-					atmos = !bits.bad && complexity >= 1 && complexity <= 16;
+					atmos = !bits.bad && complexity >= 1;
 				}
 			}
 		}
