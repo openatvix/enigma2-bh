@@ -81,7 +81,8 @@ AM_CONDITIONAL(DREAMBOX, test `echo "$BOXTYPE" | cut -b 1-2` == "dm")
 AM_CONDITIONAL(GIGABLUE, test `echo "$BOXTYPE" | cut -b 1-2` == "gb")
 AM_CONDITIONAL(VUPLUS, test `echo "$BOXTYPE" | cut -b 1-2` == "vu")
 AM_CONDITIONAL(DM800, test "$BOXTYPE" == "dm800")
-
+AM_CONDITIONAL(DM900, test "$BOXTYPE" == "dm900")
+AM_CONDITIONAL(DM920, test "$BOXTYPE" == "dm920")
 AM_CONDITIONAL(VUDUO2, test "$BOXTYPE" == vuduo2)
 AM_CONDITIONAL(VUDUO4K, test "$BOXTYPE" == vuduo4k)
 AM_CONDITIONAL(VUDUO4KLITE, test "$BOXTYPE" == vuduo4klite)
@@ -95,6 +96,9 @@ AM_CONDITIONAL(VUUNO4K, test "$BOXTYPE" == vuuno4k)
 AM_CONDITIONAL(VUUNO4KSE, test "$BOXTYPE" == vuuno4kse)
 AM_CONDITIONAL(VUZERO, test "$BOXTYPE" == vuzero)
 AM_CONDITIONAL(VUZERO4K, test "$BOXTYPE" == vuzero4k)
+
+AS_IF([test "$BOXTYPE" == "dm900"],[AC_DEFINE(HWDM900, 1,[dm900])])
+AS_IF([test "$BOXTYPE" == "dm920"],[AC_DEFINE(HWDM920, 1,[dm920])])
 
 AS_IF([test "$MACHINEBUILD" == "dual"],[AC_DEFINE(HWDUAL, 1,[dual])])
 AS_IF([test "$MACHINEBUILD" == "gbip4k"],[AC_DEFINE(HWGBIP4K, 1,[gbip4k])])
@@ -481,6 +485,24 @@ AC_SUBST([EGL_LIBS])
 AC_SUBST([GLES2_CFLAGS])
 AC_SUBST([GLES2_LIBS])
 
+# Dreambox's VC5/BEGL EGL stack (libvc5dream/libv3ddriver) only implements the
+# EGL_EXT_platform_base *pixmap* path (see lib/gdi/egl/platform/dreambox) - it
+# is unrelated to, and independent of, the FORCE_ALPHABLENDING_ACCELERATION
+# workaround below (that one is about the older 2D/bcm blit accelerator being
+# unreliable on these boxes, not about this GPU path).
+AM_CONDITIONAL(HAVE_DREAMBOX_EGL, test "x$use_egl" = "xyes" -a \( "$BOXTYPE" == "dm900" -o "$BOXTYPE" == "dm920" \))
+if test "x$use_egl" = "xyes" -a \( "$BOXTYPE" == "dm900" -o "$BOXTYPE" == "dm920" \); then
+	AC_DEFINE(HAVE_DREAMBOX_EGL, 1, [Dreambox VC5/BEGL EGL pixmap backend available])
+fi
+
+if test "$BOXTYPE" == "dm900" -o "$BOXTYPE" == "dm920"; then
+	AC_DEFINE(CONFIG_ION, 1,[define BOX use ION Allocator])
+	AC_DEFINE(HAVE_HDMIIN_DM, 1,[has hdmi in dm])
+	AC_DEFINE(LCD_DM900_Y_OFFSET, 4,[define LCD Y offset for dm900 and dm920])
+	AC_DEFINE(DREAMBOX_DUAL_TUNER, 1,[define it is dreambox dual tuner present])
+	AC_DEFINE(FORCE_ALPHABLENDING_ACCELERATION, 1,[define when the framebuffer acceleration has alphablending support, but detection slow down all])
+fi
+
 # GigaBlue Quad 4K Pro's Broadcom Nexus EGL stack (see
 # lib/gdi/egl/platform/gbquad) - a real EGL window surface reached via
 # NxClient_Join()/NXPL_RegisterNexusDisplayPlatform(), against the real
@@ -570,6 +592,14 @@ esac
 AM_CONDITIONAL(HAVE_HISI_MALI_EGL, test "x$use_egl" = "xyes" -a "x$hisi_mali_egl_box" = "xyes")
 if test "x$use_egl" = "xyes" -a "x$hisi_mali_egl_box" = "xyes"; then
 	AC_DEFINE(HAVE_HISI_MALI_EGL, 1, [HiSilicon Hi3798MV200 Mali Utgard fbdev EGL window backend available])
+fi
+
+if test "$BOXTYPE" == "dm900"; then
+	AC_DEFINE(DM900, 1, [Dreambox hardware])
+fi
+
+if test "$BOXTYPE" == "dm920"; then
+	AC_DEFINE(DM920, 1, [Dreambox hardware])
 fi
 
 if test `echo "$BOXTYPE" | cut -b 1-2` == "gb"; then
@@ -694,6 +724,7 @@ data/7segment/Makefile
 data/display96/Makefile
 data/display128/Makefile
 data/display220/Makefile
+data/display390/Makefile
 data/display400/Makefile
 data/display480/Makefile
 data/display480/OpenBh-LCDskin/Makefile
