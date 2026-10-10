@@ -580,20 +580,22 @@ namespace
 		return !bits.bad;
 	}
 
-	// Scans the accumulated capture for E-AC-3 syncframes. Our capture may
-	// start mid-frame, so every candidate sync position is checked rather
-	// than jumping by declared frame_size. A verdict is only accepted for a
-	// frame immediately followed by another valid E-AC-3 frame, so a stray
-	// 0x0B77 inside compressed payload cannot flip the result.
+	// Scans the accumulated capture for E-AC-3 syncframes. The capture is raw
+	// demux/PES data: it may start mid-frame and has PES headers between
+	// access units, so frames are NOT necessarily back to back and no fixed
+	// spacing can be assumed. Instead of chaining on the next frame, a verdict
+	// needs two separate, non-overlapping valid frames agreeing, which a stray
+	// 0x0B77 inside compressed payload (one lone, header-valid hit at most)
+	// cannot produce.
 	//
-	// Returns: 1 = Atmos frame confirmed
-	//          0 = plain DD+ confirmed (independent frame without the flag)
+	// Returns: 1 = Atmos confirmed (>= 2 Atmos frames)
+	//          0 = plain DD+ confirmed (>= 2 independent frames, none Atmos)
 	//         -1 = nothing conclusive in this range
 	int scanForAtmos(const uint8_t *data, size_t len)
 	{
 		if (len < 7)
 			return -1;
-		bool clean = false;
+		unsigned int atmos_hits = 0, clean_hits = 0;
 		for (size_t pos = 0; pos + 7 <= len; ++pos)
 		{
 			if (data[pos] != 0x0B || data[pos + 1] != 0x77)
@@ -605,21 +607,19 @@ namespace
 			if (!parseEAC3AtmosFrame(data + pos, len - pos, frame_size, atmos, &frame_type))
 				continue;
 
-			size_t next = pos + frame_size;
-			if (next + 7 > len)
-				continue; // can't confirm yet; retried once more data arrives
-
-			unsigned int next_size = 0;
-			bool next_atmos = false;
-			if (!parseEAC3AtmosFrame(data + next, len - next, next_size, next_atmos))
-				continue;
-
 			if (atmos)
-				return 1;
-			if (frame_type == 0)
-				clean = true;
+				++atmos_hits;
+			else if (frame_type == 0)
+				++clean_hits;
+
+			// Valid frame: continue after it rather than scanning its payload.
+			pos += frame_size - 1;
 		}
-		return clean ? 0 : -1;
+		if (atmos_hits >= 2)
+			return 1;
+		if (clean_hits >= 2 && atmos_hits == 0)
+			return 0;
+		return -1;
 	}
 }
 
