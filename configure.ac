@@ -81,6 +81,7 @@ AM_CONDITIONAL(DREAMBOX, test `echo "$BOXTYPE" | cut -b 1-2` == "dm")
 AM_CONDITIONAL(GIGABLUE, test `echo "$BOXTYPE" | cut -b 1-2` == "gb")
 AM_CONDITIONAL(VUPLUS, test `echo "$BOXTYPE" | cut -b 1-2` == "vu")
 AM_CONDITIONAL(DM800, test "$BOXTYPE" == "dm800")
+
 AM_CONDITIONAL(DM900, test "$BOXTYPE" == "dm900")
 AM_CONDITIONAL(DM920, test "$BOXTYPE" == "dm920")
 AM_CONDITIONAL(VUDUO2, test "$BOXTYPE" == vuduo2)
