@@ -304,8 +304,23 @@ bool parseEAC3AtmosFrame(const guint8 *data, gsize size, bool swap16, guint &fra
 		if (!br.ok || addbsil > 63)
 			return false;
 
-		br.skip(7);
-		atmos = br.ok && br.read(1) != 0;
+		/*
+		 * Dolby Atmos (JOC) signals itself with exactly two addbsi bytes:
+		 * flag_ec3_extension_type_a (LSB of byte 0) followed by
+		 * complexity_index_type_a (byte 1, non-zero and small). Checking
+		 * only the flag bit also matches unrelated addbsi payloads and any
+		 * frame where the metadata walk above ended up misaligned, so
+		 * require addbsil == 1 and a plausible complexity index as well.
+		 */
+		if (addbsil == 1)
+		{
+			br.skip(7);
+			if (br.read(1) != 0)
+			{
+				const guint complexity = br.read(8);
+				atmos = br.ok && complexity >= 1 && complexity <= 16;
+			}
+		}
 	}
 
 	return br.ok;
@@ -430,7 +445,15 @@ struct EAC3AtmosProbeData
 {
 	int stream;
 	guint buffers;
+	guint positive_run; /* consecutive buffers carrying the Atmos flag */
+	guint negative_run; /* consecutive buffers without it, while atmos is set */
+	bool atmos;         /* last state reported to the service */
 };
+
+/* Consecutive Atmos buffers needed before reporting Atmos, and consecutive
+ * non-Atmos buffers needed (once reported) before reporting it gone again. */
+static const guint EAC3_ATMOS_CONFIRM_BUFFERS = 3;
+static const guint EAC3_ATMOS_LOST_BUFFERS = 48;
 
 void freeEAC3AtmosProbeData(gpointer data)
 {
@@ -457,26 +480,49 @@ GstPadProbeReturn eac3AtmosProbe(GstPad *pad, GstPadProbeInfo *info, gpointer us
 
 	if (detected)
 	{
-		eDebug("[eServiceMP3] E-AC3 Atmos/JOC detected on audio stream %d", probe->stream);
+		++probe->positive_run;
+		probe->negative_run = 0;
+	}
+	else
+	{
+		probe->positive_run = 0;
+		if (probe->atmos)
+			++probe->negative_run;
+	}
 
+	bool report = false;
+	if (!probe->atmos && probe->positive_run >= EAC3_ATMOS_CONFIRM_BUFFERS)
+	{
+		probe->atmos = true;
+		report = true;
+		eDebug("[eServiceMP3] E-AC3 Atmos/JOC detected on audio stream %d", probe->stream);
+	}
+	else if (probe->atmos && probe->negative_run >= EAC3_ATMOS_LOST_BUFFERS)
+	{
+		probe->atmos = false;
+		probe->positive_run = 0;
+		report = true;
+		eDebug("[eServiceMP3] E-AC3 Atmos/JOC no longer present on audio stream %d", probe->stream);
+	}
+
+	if (report)
+	{
 		GstObject *parent = gst_pad_get_parent(pad);
 		if (parent && GST_IS_ELEMENT(parent))
 		{
 			GstStructure *event = gst_structure_new("eventAtmosDetected",
 				"stream", G_TYPE_INT, probe->stream,
+				"atmos", G_TYPE_BOOLEAN, probe->atmos ? TRUE : FALSE,
 				NULL);
 			gst_element_post_message(GST_ELEMENT(parent),
 				gst_message_new_element(parent, event));
 		}
 		if (parent)
 			gst_object_unref(parent);
-
-		return GST_PAD_PROBE_REMOVE;
 	}
 
-	if (probe->buffers >= 64)
-		return GST_PAD_PROBE_REMOVE;
-
+	/* Stay attached: the soundtrack can switch between Atmos and plain
+	 * DD+ mid-stream (ads, trailers, programme changes). */
 	return GST_PAD_PROBE_OK;
 }
 
@@ -5219,7 +5265,7 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 					{
 						g_object_set_qdata(G_OBJECT(pad), eac3AtmosProbeQuark(), GUINT_TO_POINTER(1));
 						gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, eac3AtmosProbe,
-							new EAC3AtmosProbeData{i, 0}, freeEAC3AtmosProbeData);
+							new EAC3AtmosProbeData{i, 0, 0, 0, false}, freeEAC3AtmosProbeData);
 					}
 
 					if ((!strcmp(g_type, "audio/x-dts") || !strcmp(g_type, "audio/dts")) &&
@@ -5260,7 +5306,7 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 
 					gchar *audio_meta_lower = g_ascii_strdown(audio_meta.c_str(), -1);
 					const bool has_atmos = audio_meta_lower &&
-						(strstr(audio_meta_lower, "dolby atmos") || strstr(audio_meta_lower, "atmos") || strstr(audio_meta_lower, "joc"));
+						(strstr(audio_meta_lower, "dolby atmos") || strstr(audio_meta_lower, "atmos"));
 
 					const bool meta_truehd = audio_meta_lower &&
 						(strstr(audio_meta_lower, "truehd") || strstr(audio_meta_lower, "true-hd"));
@@ -5633,13 +5679,24 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 						else if (!strcmp(eventname, "eventAtmosDetected"))
 						{
 							int stream = -1;
+							gboolean atmos = TRUE;
+							gst_structure_get_boolean(msgstruct, "atmos", &atmos);
 							if (gst_structure_get_int(msgstruct, "stream", &stream) &&
-								stream >= 0 && stream < (int)m_audioStreams.size() &&
-								m_audioStreams[stream].codec != "Dolby Atmos")
+								stream >= 0 && stream < (int)m_audioStreams.size())
 							{
-								m_audioStreams[stream].codec = "Dolby Atmos";
-								eDebug("[eServiceMP3] audio stream=%d updated codec=Dolby Atmos", stream);
-								m_event((iPlayableService*)this, evUpdatedInfo);
+								std::string &codec = m_audioStreams[stream].codec;
+								if (atmos && codec != "Dolby Atmos")
+								{
+									codec = "Dolby Atmos";
+									eDebug("[eServiceMP3] audio stream=%d updated codec=Dolby Atmos", stream);
+									m_event((iPlayableService*)this, evUpdatedInfo);
+								}
+								else if (!atmos && codec == "Dolby Atmos")
+								{
+									codec = "Dolby Digital +";
+									eDebug("[eServiceMP3] audio stream=%d reverted codec=Dolby Digital +", stream);
+									m_event((iPlayableService*)this, evUpdatedInfo);
+								}
 							}
 						}
 						else if (!strcmp(eventname, "eventDTSProfileDetected"))
