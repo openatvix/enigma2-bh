@@ -2130,11 +2130,13 @@ eServiceMP3::eServiceMP3(eServiceReference ref):
 		if ( m_sourceinfo.is_streaming )
 		{
 			g_signal_connect (G_OBJECT (m_gst_playbin), "notify::source", G_CALLBACK (playbinNotifySource), this);
+			/* Also watch nested demuxers for native DASH quality selection. */
+			if (m_download_buffer_path != "" || m_sourceinfo.is_dash)
+				g_signal_connect(G_OBJECT(m_gst_playbin), "element-added", G_CALLBACK(handleElementAdded), this);
 			if (m_download_buffer_path != "")
 			{
 				/* use progressive download buffering */
 				flags |= GST_PLAY_FLAG_DOWNLOAD;
-				g_signal_connect(G_OBJECT(m_gst_playbin), "element-added", G_CALLBACK(handleElementAdded), this);
 				/* limit file size */
 				g_object_set(m_gst_playbin, "ring-buffer-max-size", (guint64)(8LL * 1024LL * 1024LL), NULL);
 			}
@@ -2146,7 +2148,13 @@ eServiceMP3::eServiceMP3(eServiceReference ref):
 			/* increase the default 2 second / 2 MB buffer limitations to 5s / 5MB */
 			g_object_set(G_OBJECT(m_gst_playbin), "buffer-duration", 5LL * GST_SECOND, NULL);
 			g_object_set(G_OBJECT(m_gst_playbin), "buffer-size", m_buffer_size, NULL);
-			if (m_sourceinfo.is_hls || m_sourceinfo.is_dash)
+			if (m_sourceinfo.is_dash)
+			{
+				/* 1 Gbps in kbps: high enough to prefer the top DASH representation,
+				 * and inside legacy dashdemux's 4,294,967 kbps property limit. */
+				g_object_set(G_OBJECT(m_gst_playbin), "connection-speed", (guint64)(1000000LL), NULL);
+			}
+			else if (m_sourceinfo.is_hls)
 				g_object_set(G_OBJECT(m_gst_playbin), "connection-speed", (guint64)(4495000LL), NULL);
 		}
 		g_object_set (G_OBJECT (m_gst_playbin), "flags", flags, NULL);
@@ -5980,14 +5988,25 @@ void eServiceMP3::handleElementAdded(GstBin *bin, GstElement *element, gpointer 
 				g_object_set(G_OBJECT(element), "temp-template", NULL, NULL);
 			}
 		}
+		else if (_this->m_sourceinfo.is_dash && g_str_has_prefix(elementname, "dashdemux"))
+		{
+			/* Prefer the highest-bitrate DASH representation from startup.
+			 * Legacy dashdemux uses kbps for connection-speed and guint for the
+			 * property, so do not use a number larger than G_MAXUINT / 1000. */
+			g_object_set(G_OBJECT(element),
+				"connection-speed", (guint)1000000,
+				"bitrate-limit", (gfloat)1.0f,
+				"max-bitrate", (guint)0,
+				"max-video-width", (guint)0,
+				"max-video-height", (guint)0,
+				NULL);
+			eDebug("[eServiceMP3] DASH high-quality selection enabled (connection-speed=1000000 kbps)");
+		}
 		else if (g_str_has_prefix(elementname, "uridecodebin")
 			|| g_str_has_prefix(elementname, "decodebin"))
 		{
-			/*
-			 * Listen for queue2 element added to uridecodebin/decodebin2 as well.
-			 * Ignore other bins since they may have unrelated queues
-			 */
-				g_signal_connect(element, "element-added", G_CALLBACK(handleElementAdded), user_data);
+			/* Listen for nested queue2 / DASH demux elements as well. */
+			g_signal_connect(element, "element-added", G_CALLBACK(handleElementAdded), user_data);
 		}
 		g_free(elementname);
 	}
