@@ -304,23 +304,8 @@ bool parseEAC3AtmosFrame(const guint8 *data, gsize size, bool swap16, guint &fra
 		if (!br.ok || addbsil > 63)
 			return false;
 
-		/*
-		 * Dolby Atmos (JOC) signals itself with exactly two addbsi bytes:
-		 * flag_ec3_extension_type_a (LSB of byte 0) followed by
-		 * complexity_index_type_a (byte 1, non-zero and small). Checking
-		 * only the flag bit also matches unrelated addbsi payloads and any
-		 * frame where the metadata walk above ended up misaligned, so
-		 * require addbsil == 1 and a plausible complexity index as well.
-		 */
-		if (addbsil == 1)
-		{
-			br.skip(7);
-			if (br.read(1) != 0)
-			{
-				const guint complexity = br.read(8);
-				atmos = br.ok && complexity >= 1 && complexity <= 16;
-			}
-		}
+		br.skip(7);
+		atmos = br.ok && br.read(1) != 0;
 	}
 
 	return br.ok;
@@ -441,19 +426,80 @@ bool eac3FrameHasAtmos(const guint8 *data, gsize size)
 	return false;
 }
 
+/* Fallback when DASH-derived compressed caps omit their channel count.
+ * E-AC-3 acmod and lfeon identify the actual encoded speaker channels. */
+guint eac3FrameChannels(const guint8 *data, gsize size)
+{
+	if (!data || size < 7)
+		return 0;
+
+	bool swap16 = false;
+	if (size > 15 && data[0] == 0x72 && data[1] == 0xf8 &&
+		data[2] == 0x1f && data[3] == 0x4e)
+	{
+		data += 8;
+		size -= 8;
+		swap16 = true;
+	}
+	else if (size > 15 && data[0] == 0xf8 && data[1] == 0x72 &&
+		data[2] == 0x4e && data[3] == 0x1f)
+	{
+		data += 8;
+		size -= 8;
+	}
+	else if (data[0] == 0x77 && data[1] == 0x0b)
+		swap16 = true;
+
+	EAC3AtmosBitReader br(data, size, swap16);
+	if (br.read(16) != 0x0b77)
+		return 0;
+	const guint frame_type = br.read(2);
+	const guint substream_id = br.read(3);
+	const guint frame_size = (br.read(11) + 1) << 1;
+	const guint sample_rate_code = br.read(2);
+	/* fscod2 when sample_rate_code == 3, numblkscod otherwise. */
+	const guint rate_or_blocks = br.read(2);
+	const guint acmod = br.read(3);
+	const guint lfeon = br.read(1);
+	const guint bsid = br.read(5);
+	if (!br.ok || frame_type == 3 || substream_id != 0 || frame_size > size ||
+		bsid <= 10 || bsid > 16 || (sample_rate_code == 3 && rate_or_blocks == 3))
+		return 0;
+	static const guint channels_for_acmod[8] = { 2, 1, 2, 3, 3, 4, 4, 5 };
+	return channels_for_acmod[acmod] + lfeon;
+}
+
+/* AAC AudioSpecificConfig channelConfiguration, in the MP4 codec_data caps.
+ * A value of zero needs a program-config-element and cannot be guessed. */
+guint aacCodecDataChannels(const GstStructure *str)
+{
+	const GValue *value = gst_structure_get_value(str, "codec_data");
+	if (!value || !GST_VALUE_HOLDS_BUFFER(value))
+		return 0;
+	GstBuffer *buf = gst_value_get_buffer(value);
+	GstMapInfo map;
+	if (!buf || !gst_buffer_map(buf, &map, GST_MAP_READ))
+		return 0;
+	guint channels = 0;
+	if (map.size >= 2)
+	{
+		const guint config = (map.data[1] >> 3) & 0x0f;
+		if (config >= 1 && config <= 6)
+			channels = config;
+		else if (config == 7)
+			channels = 8;
+	}
+	gst_buffer_unmap(buf, &map);
+	return channels;
+}
+
 struct EAC3AtmosProbeData
 {
 	int stream;
 	guint buffers;
-	guint positive_run; /* consecutive buffers carrying the Atmos flag */
-	guint negative_run; /* consecutive buffers without it, while atmos is set */
-	bool atmos;         /* last state reported to the service */
+	bool channelsReported;
+	bool inspectChannels;
 };
-
-/* Consecutive Atmos buffers needed before reporting Atmos, and consecutive
- * non-Atmos buffers needed (once reported) before reporting it gone again. */
-static const guint EAC3_ATMOS_CONFIRM_BUFFERS = 3;
-static const guint EAC3_ATMOS_LOST_BUFFERS = 48;
 
 void freeEAC3AtmosProbeData(gpointer data)
 {
@@ -472,47 +518,24 @@ GstPadProbeReturn eac3AtmosProbe(GstPad *pad, GstPadProbeInfo *info, gpointer us
 
 	GstMapInfo map;
 	bool detected = false;
+	guint encoded_channels = 0;
 	if (gst_buffer_map(buffer, &map, GST_MAP_READ))
 	{
+		if (probe->inspectChannels && !probe->channelsReported)
+			encoded_channels = eac3FrameChannels(map.data, map.size);
 		detected = eac3FrameHasAtmos(map.data, map.size);
 		gst_buffer_unmap(buffer, &map);
 	}
 
-	if (detected)
+	if (encoded_channels > 0)
 	{
-		++probe->positive_run;
-		probe->negative_run = 0;
-	}
-	else
-	{
-		probe->positive_run = 0;
-		if (probe->atmos)
-			++probe->negative_run;
-	}
-
-	bool report = false;
-	if (!probe->atmos && probe->positive_run >= EAC3_ATMOS_CONFIRM_BUFFERS)
-	{
-		probe->atmos = true;
-		report = true;
-		eDebug("[eServiceMP3] E-AC3 Atmos/JOC detected on audio stream %d", probe->stream);
-	}
-	else if (probe->atmos && probe->negative_run >= EAC3_ATMOS_LOST_BUFFERS)
-	{
-		probe->atmos = false;
-		probe->positive_run = 0;
-		report = true;
-		eDebug("[eServiceMP3] E-AC3 Atmos/JOC no longer present on audio stream %d", probe->stream);
-	}
-
-	if (report)
-	{
+		probe->channelsReported = true;
 		GstObject *parent = gst_pad_get_parent(pad);
 		if (parent && GST_IS_ELEMENT(parent))
 		{
-			GstStructure *event = gst_structure_new("eventAtmosDetected",
+			GstStructure *event = gst_structure_new("eventAudioChannelsDetected",
 				"stream", G_TYPE_INT, probe->stream,
-				"atmos", G_TYPE_BOOLEAN, probe->atmos ? TRUE : FALSE,
+				"channels", G_TYPE_INT, (gint)encoded_channels,
 				NULL);
 			gst_element_post_message(GST_ELEMENT(parent),
 				gst_message_new_element(parent, event));
@@ -521,8 +544,28 @@ GstPadProbeReturn eac3AtmosProbe(GstPad *pad, GstPadProbeInfo *info, gpointer us
 			gst_object_unref(parent);
 	}
 
-	/* Stay attached: the soundtrack can switch between Atmos and plain
-	 * DD+ mid-stream (ads, trailers, programme changes). */
+	if (detected)
+	{
+		eDebug("[eServiceMP3] E-AC3 Atmos/JOC detected on audio stream %d", probe->stream);
+
+		GstObject *parent = gst_pad_get_parent(pad);
+		if (parent && GST_IS_ELEMENT(parent))
+		{
+			GstStructure *event = gst_structure_new("eventAtmosDetected",
+				"stream", G_TYPE_INT, probe->stream,
+				NULL);
+			gst_element_post_message(GST_ELEMENT(parent),
+				gst_message_new_element(parent, event));
+		}
+		if (parent)
+			gst_object_unref(parent);
+
+		return GST_PAD_PROBE_REMOVE;
+	}
+
+	if (probe->buffers >= 64)
+		return GST_PAD_PROBE_REMOVE;
+
 	return GST_PAD_PROBE_OK;
 }
 
@@ -1768,6 +1811,9 @@ eServiceMP3::eServiceMP3(eServiceReference ref):
 	m_dvb_subtitle_parser = new eDVBSubtitleParser();
 	m_dvb_subtitle_parser->connectNewPage(sigc::mem_fun(*this, &eServiceMP3::newDVBSubtitlePage), m_new_dvb_subtitle_page_connection);
 	m_passthrough_fix_timer = eTimer::create(eApp);
+	m_dash_recover_timer = eTimer::create(eApp);
+	m_dash_recover_count = 0;
+	m_dash_recover_last = 0;
 	m_audio_switch_deferred = -1;
 	m_audio_switch_flush_phase = AudioSwitchFlushNone;
 	m_audio_switch_flush_resume = true;
@@ -1835,6 +1881,7 @@ eServiceMP3::eServiceMP3(eServiceReference ref):
 	CONNECT(m_pump.recv_msg, eServiceMP3::gstPoll);
 	CONNECT(m_nownext_timer->timeout, eServiceMP3::updateEpgCacheNowNext);
 	CONNECT(m_passthrough_fix_timer->timeout, eServiceMP3::forceAudioReset);
+	CONNECT(m_dash_recover_timer->timeout, eServiceMP3::dashRecover);
 
 	m_aspect = m_width = m_height = m_framerate = m_progressive = m_gamma = -1;
 	m_hdr_type = 0;
@@ -1853,7 +1900,21 @@ eServiceMP3::eServiceMP3(eServiceReference ref):
 
 	const char *filename;
 	std::string filename_str;
-	size_t pos = m_ref.path.find('#');
+	/* "&e2clearkeys=<kid>=<key>[,<kid>=<key>...]" (hex) - ClearKey CENC keys
+	 * handed to the cencdec element via handleDeepElementAdded(). Stripped from
+	 * the path here, ahead of the extension/"#" parsing below, so that neither
+	 * is thrown off by it (e.g. "x.mpd&e2clearkeys=..." must still be seen as
+	 * ".mpd") and it never reaches the source element. */
+	size_t pos = m_ref.path.find("&e2clearkeys=");
+	if (pos != std::string::npos && m_ref.path.compare(0, 4, "http") == 0)
+	{
+		size_t kstart = pos + strlen("&e2clearkeys=");
+		size_t kend = m_ref.path.find_first_of("&#", kstart);
+		m_clearkeys = m_ref.path.substr(kstart, kend == std::string::npos ? std::string::npos : kend - kstart);
+		m_ref.path.erase(pos, kend == std::string::npos ? std::string::npos : kend - pos);
+		eDebug("[eServiceMP3] construct: e2clearkeys supplied (%zu bytes)", m_clearkeys.size());
+	}
+	pos = m_ref.path.find('#');
 	size_t pos_q = m_ref.path.find('?');
 	if (pos != std::string::npos && (m_ref.path.compare(0, 4, "http") == 0 || m_ref.path.compare(0, 4, "rtsp") == 0))
 	{
@@ -2130,13 +2191,13 @@ eServiceMP3::eServiceMP3(eServiceReference ref):
 		if ( m_sourceinfo.is_streaming )
 		{
 			g_signal_connect (G_OBJECT (m_gst_playbin), "notify::source", G_CALLBACK (playbinNotifySource), this);
-			/* Also watch nested demuxers for native DASH quality selection. */
-			if (m_download_buffer_path != "" || m_sourceinfo.is_dash)
-				g_signal_connect(G_OBJECT(m_gst_playbin), "element-added", G_CALLBACK(handleElementAdded), this);
+			if (!m_clearkeys.empty())
+				g_signal_connect(G_OBJECT(m_gst_playbin), "deep-element-added", G_CALLBACK(handleDeepElementAdded), this);
 			if (m_download_buffer_path != "")
 			{
 				/* use progressive download buffering */
 				flags |= GST_PLAY_FLAG_DOWNLOAD;
+				g_signal_connect(G_OBJECT(m_gst_playbin), "element-added", G_CALLBACK(handleElementAdded), this);
 				/* limit file size */
 				g_object_set(m_gst_playbin, "ring-buffer-max-size", (guint64)(8LL * 1024LL * 1024LL), NULL);
 			}
@@ -2148,13 +2209,7 @@ eServiceMP3::eServiceMP3(eServiceReference ref):
 			/* increase the default 2 second / 2 MB buffer limitations to 5s / 5MB */
 			g_object_set(G_OBJECT(m_gst_playbin), "buffer-duration", 5LL * GST_SECOND, NULL);
 			g_object_set(G_OBJECT(m_gst_playbin), "buffer-size", m_buffer_size, NULL);
-			if (m_sourceinfo.is_dash)
-			{
-				/* 1 Gbps in kbps: high enough to prefer the top DASH representation,
-				 * and inside legacy dashdemux's 4,294,967 kbps property limit. */
-				g_object_set(G_OBJECT(m_gst_playbin), "connection-speed", (guint64)(1000000LL), NULL);
-			}
-			else if (m_sourceinfo.is_hls)
+			if (m_sourceinfo.is_hls || m_sourceinfo.is_dash)
 				g_object_set(G_OBJECT(m_gst_playbin), "connection-speed", (guint64)(4495000LL), NULL);
 		}
 		g_object_set (G_OBJECT (m_gst_playbin), "flags", flags, NULL);
@@ -2637,6 +2692,18 @@ bool eServiceMP3::waitForHardwareRelease(unsigned int timeout_ms)
 	return remaining == 0;
 }
 
+void eServiceMP3::dashRecover()
+{
+	if (!m_gst_playbin || m_state != stRunning)
+		return;
+	eDebug("[eServiceMP3] restarting dash pipeline (attempt %d)", m_dash_recover_count);
+	m_dash_recover_last = time(NULL);
+	/* same sequence as the "redirect" element message: the playbin keeps its uri,
+	 * and the deep-element-added hook hands the clearkeys to the new cencdec elements */
+	gst_element_set_state(m_gst_playbin, GST_STATE_NULL);
+	gst_element_set_state(m_gst_playbin, GST_STATE_PLAYING);
+}
+
 void eServiceMP3::disconnectAsyncSignalHandlers()
 {
 	if (!m_gst_playbin)
@@ -2665,6 +2732,7 @@ void eServiceMP3::disconnectAsyncSignalHandlers()
 	 * that callback was never actually connected to. */
 	g_signal_handlers_disconnect_by_func(m_gst_playbin, (gpointer)playbinNotifySource, this);
 	g_signal_handlers_disconnect_by_func(m_gst_playbin, (gpointer)handleElementAdded, this);
+	g_signal_handlers_disconnect_by_func(m_gst_playbin, (gpointer)handleDeepElementAdded, this);
 
 	GstIterator *eit = gst_bin_iterate_recurse(GST_BIN(m_gst_playbin));
 	GValue eitem = G_VALUE_INIT;
@@ -2705,6 +2773,7 @@ void eServiceMP3::disconnectAsyncSignalHandlers()
 RESULT eServiceMP3::stop()
 {
 	m_passthrough_fix_timer->stop();
+	m_dash_recover_timer->stop();
 	/* A switch still waiting on the pipeline to settle - a fresh pipeline
 	 * session starts its own settling from scratch. */
 	m_audio_switch_deferred = -1;
@@ -4146,6 +4215,9 @@ RESULT eServiceMP3::selectTrack(unsigned int i)
 {
 	m_clear_buffers = true;
 	int result = selectAudioStream(i);
+	/* The DASH selector path intentionally never flushes the pipeline. */
+	if (m_sourceinfo.is_dash)
+		m_clear_buffers = false;
 	return result;
 }
 
@@ -4642,6 +4714,17 @@ int eServiceMP3::selectAudioStream(int i, bool skipAudioFix)
 			setCacheEntry(true, i);
 			if (isActualAudioSwitch)
 			{
+				/* DASH exposes audio and video as separate tracks.  Switching
+				 * current-audio is sufficient; the legacy seek/restart below
+				 * reinitialises adaptive demux and can reset the selected video
+				 * representation (or stall a live MPD permanently).  Let playbin's
+				 * stream selector finish naturally without flushing the video. */
+				if (m_sourceinfo.is_dash)
+				{
+					eDebug("[eServiceMP3] DASH audio switch to %d: preserving video and avoiding seek/restart", i);
+					m_clear_buffers = false;
+					return 0;
+				}
 				/*
 				 * beginAudioSwitchPauseFlush() is a no-op for a live source
 				 * (see its own m_is_live guard) - its pause/wait-for-PAUSED/
@@ -5106,6 +5189,26 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 					stop();
 				}
 			}
+			if ( m_sourceinfo.is_dash && m_state == stRunning && g_str_has_prefix(sourceName, "dashdemux")
+				&& (err->domain == GST_STREAM_ERROR || err->domain == GST_RESOURCE_ERROR) )
+			{
+				/* a burst of errors arrives at once, schedule just one restart */
+				if ( !m_dash_recover_timer->isActive() )
+				{
+					time_t now = time(NULL);
+					/* a restart that held for a minute counts as healthy again */
+					if ( now - m_dash_recover_last > 60 )
+						m_dash_recover_count = 0;
+					if ( m_dash_recover_count < 3 )
+					{
+						m_dash_recover_count++;
+						eDebug("[eServiceMP3] dash error, restarting pipeline in %d ms (attempt %d/3)", 1500 * m_dash_recover_count, m_dash_recover_count);
+						m_dash_recover_timer->start(1500 * m_dash_recover_count, true);
+					}
+					else
+						eWarning("[eServiceMP3] dash error, giving up after 3 restarts");
+				}
+			}
 			g_error_free(err);
 			break;
 		}
@@ -5240,8 +5343,78 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 				g_object_get (m_gst_playbin, "n-audio", &n_audio, NULL);
 				g_object_get (m_gst_playbin, "n-text", &n_text, NULL);
 
+				/*
+				 * Some DASH MPDs expose each bitrate as a separate video stream,
+				 * sometimes listing an I-frame-only/trick-play stream first.
+				 * Legacy playbin selects that first stream by default, regardless
+				 * of its connection-speed setting. Do not set current-video in
+				 * the constructor: playbin has no video selector at that point
+				 * and silently rejects the request. After preroll the pads have
+				 * real caps, so choose the largest normal video frame.
+				 * This is deliberately restricted to MPEG-DASH.
+				 */
+				if (m_sourceinfo.is_dash && n_video > 1)
+				{
+					gint best_video = -1;
+					guint64 best_pixels = 0;
+					for (gint vi = 0; vi < n_video; ++vi)
+					{
+						GstPad *video_pad = NULL;
+						g_signal_emit_by_name(m_gst_playbin, "get-video-pad", vi, &video_pad);
+						if (!video_pad)
+							continue;
 
-				eDebug("[eServiceMP3] async-done - %d video, %d audio, %d subtitle", n_video, n_audio, n_text);
+						/* Reject trick-play streams when their stream ID says so. */
+						bool trick_play = false;
+						gchar *stream_id = gst_pad_get_stream_id(video_pad);
+						if (stream_id)
+						{
+							gchar *lower = g_ascii_strdown(stream_id, -1);
+							trick_play = g_strrstr(lower, "iframe") || g_strrstr(lower, "trick");
+							g_free(lower);
+							g_free(stream_id);
+						}
+
+						GstCaps *caps = gst_pad_get_current_caps(video_pad);
+						gst_object_unref(video_pad);
+						if (!caps)
+							continue;
+
+						gint width = 0, height = 0;
+						if (!gst_caps_is_empty(caps) && !gst_caps_is_any(caps))
+						{
+							const GstStructure *s = gst_caps_get_structure(caps, 0);
+							gst_structure_get_int(s, "width", &width);
+							gst_structure_get_int(s, "height", &height);
+						}
+						gst_caps_unref(caps);
+
+						eTrace("[eServiceMP3] DASH video %d: %dx%d%s",
+							vi, width, height, trick_play ? " (trick-play)" : "");
+						if (trick_play || width <= 0 || height <= 0)
+							continue;
+						const guint64 pixels = (guint64)width * (guint64)height;
+						if (pixels > best_pixels)
+						{
+							best_pixels = pixels;
+							best_video = vi;
+						}
+					}
+
+					if (best_video >= 0)
+					{
+						gint current_video = -1;
+						g_object_get(m_gst_playbin, "current-video", &current_video, NULL);
+						if (current_video != best_video)
+						{
+							eTrace("[eServiceMP3] DASH select video %d -> %d (%" G_GUINT64_FORMAT " pixels)",
+								current_video, best_video, best_pixels);
+							g_object_set(m_gst_playbin, "current-video", best_video, NULL);
+						}
+					}
+				}
+
+				eTrace("[eServiceMP3] async-done - %d video, %d audio, %d subtitle", n_video, n_audio, n_text);
 
 				if ( n_video + n_audio <= 0 )
 					stop();
@@ -5269,6 +5442,12 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 					gint channels = 0;
 					if (gst_structure_get_int(str, "channels", &channels) && channels > 0)
 						audio.channels = channels;
+					/* DASH often omits 'channels' from compressed AAC caps even
+					 * when the MP4 AudioSpecificConfig contains it. */
+					if (m_sourceinfo.is_dash && audio.channels == 0 &&
+						(!strcmp(g_type, "audio/mpeg") || !strcmp(g_type, "audio/x-aac") ||
+						 !strcmp(g_type, "audio/aac")))
+						audio.channels = aacCodecDataChannels(str);
 					eDebug("[eServiceMP3] AUDIO STRUCT=%s channels=%d", g_type, audio.channels);
 
 					if ((!strcmp(g_type, "audio/x-eac3") || !strcmp(g_type, "audio/eac3")) &&
@@ -5276,7 +5455,7 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 					{
 						g_object_set_qdata(G_OBJECT(pad), eac3AtmosProbeQuark(), GUINT_TO_POINTER(1));
 						gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, eac3AtmosProbe,
-							new EAC3AtmosProbeData{i, 0, 0, 0, false}, freeEAC3AtmosProbeData);
+							new EAC3AtmosProbeData{i, 0, false, m_sourceinfo.is_dash}, freeEAC3AtmosProbeData);
 					}
 
 					if ((!strcmp(g_type, "audio/x-dts") || !strcmp(g_type, "audio/dts")) &&
@@ -5317,7 +5496,7 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 
 					gchar *audio_meta_lower = g_ascii_strdown(audio_meta.c_str(), -1);
 					const bool has_atmos = audio_meta_lower &&
-						(strstr(audio_meta_lower, "dolby atmos") || strstr(audio_meta_lower, "atmos"));
+						(strstr(audio_meta_lower, "dolby atmos") || strstr(audio_meta_lower, "atmos") || strstr(audio_meta_lower, "joc"));
 
 					const bool meta_truehd = audio_meta_lower &&
 						(strstr(audio_meta_lower, "truehd") || strstr(audio_meta_lower, "true-hd"));
@@ -5528,6 +5707,13 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 
 				for (unsigned int ai = 0; ai < audioStreams_temp.size() && ai < m_audioStreams.size(); ++ai)
 				{
+					/* Avoid losing a previously detected channel count during
+					 * DASH re-preroll/audio re-enumeration when the caps omit it. */
+					if (m_sourceinfo.is_dash && audioStreams_temp[ai].channels == 0 &&
+						m_audioStreams[ai].channels > 0 &&
+						m_audioStreams[ai].type == audioStreams_temp[ai].type &&
+						m_audioStreams[ai].language_code == audioStreams_temp[ai].language_code)
+						audioStreams_temp[ai].channels = m_audioStreams[ai].channels;
 					const std::string &old_codec = m_audioStreams[ai].codec;
 					std::string &new_codec = audioStreams_temp[ai].codec;
 					if (old_codec == "Dolby Atmos" && new_codec == "Dolby Digital +")
@@ -5690,24 +5876,28 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 						else if (!strcmp(eventname, "eventAtmosDetected"))
 						{
 							int stream = -1;
-							gboolean atmos = TRUE;
-							gst_structure_get_boolean(msgstruct, "atmos", &atmos);
 							if (gst_structure_get_int(msgstruct, "stream", &stream) &&
-								stream >= 0 && stream < (int)m_audioStreams.size())
+								stream >= 0 && stream < (int)m_audioStreams.size() &&
+								m_audioStreams[stream].codec != "Dolby Atmos")
 							{
-								std::string &codec = m_audioStreams[stream].codec;
-								if (atmos && codec != "Dolby Atmos")
-								{
-									codec = "Dolby Atmos";
-									eDebug("[eServiceMP3] audio stream=%d updated codec=Dolby Atmos", stream);
-									m_event((iPlayableService*)this, evUpdatedInfo);
-								}
-								else if (!atmos && codec == "Dolby Atmos")
-								{
-									codec = "Dolby Digital +";
-									eDebug("[eServiceMP3] audio stream=%d reverted codec=Dolby Digital +", stream);
-									m_event((iPlayableService*)this, evUpdatedInfo);
-								}
+								m_audioStreams[stream].codec = "Dolby Atmos";
+								eDebug("[eServiceMP3] audio stream=%d updated codec=Dolby Atmos", stream);
+								m_event((iPlayableService*)this, evUpdatedInfo);
+							}
+						}
+						else if (!strcmp(eventname, "eventAudioChannelsDetected"))
+						{
+							int stream = -1, channels = 0;
+							if (m_sourceinfo.is_dash &&
+								gst_structure_get_int(msgstruct, "stream", &stream) &&
+								gst_structure_get_int(msgstruct, "channels", &channels) &&
+								stream >= 0 && stream < (int)m_audioStreams.size() &&
+								channels > 0 && channels <= 16 &&
+								m_audioStreams[stream].channels != channels)
+							{
+								m_audioStreams[stream].channels = channels;
+								eDebug("[eServiceMP3] DASH audio stream=%d detected channels=%d", stream, channels);
+								m_event((iPlayableService*)this, evUpdatedInfo);
 							}
 						}
 						else if (!strcmp(eventname, "eventDTSProfileDetected"))
@@ -5970,6 +6160,23 @@ void eServiceMP3::playbinNotifySource(GObject *object, GParamSpec *unused, gpoin
 	}
 }
 
+void eServiceMP3::handleDeepElementAdded(GstBin *bin, GstBin *sub_bin, GstElement *element, gpointer user_data)
+{
+	eServiceMP3 *_this = (eServiceMP3*)user_data;
+	GstElementFactory *factory = gst_element_get_factory(element);
+	if (!_this || !factory || _this->m_clearkeys.empty())
+		return;
+	if (strcmp(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)), "cencdec") != 0)
+		return;
+	if (!g_object_class_find_property(G_OBJECT_GET_CLASS(element), "clearkeys"))
+	{
+		eDebug("[eServiceMP3] cencdec has no 'clearkeys' property, installed plugin is not the patched build");
+		return;
+	}
+	eDebug("[eServiceMP3] passing clearkeys to cencdec");
+	g_object_set(G_OBJECT(element), "clearkeys", _this->m_clearkeys.c_str(), NULL);
+}
+
 void eServiceMP3::handleElementAdded(GstBin *bin, GstElement *element, gpointer user_data)
 {
 	eServiceMP3 *_this = (eServiceMP3*)user_data;
@@ -5988,25 +6195,14 @@ void eServiceMP3::handleElementAdded(GstBin *bin, GstElement *element, gpointer 
 				g_object_set(G_OBJECT(element), "temp-template", NULL, NULL);
 			}
 		}
-		else if (_this->m_sourceinfo.is_dash && g_str_has_prefix(elementname, "dashdemux"))
-		{
-			/* Prefer the highest-bitrate DASH representation from startup.
-			 * Legacy dashdemux uses kbps for connection-speed and guint for the
-			 * property, so do not use a number larger than G_MAXUINT / 1000. */
-			g_object_set(G_OBJECT(element),
-				"connection-speed", (guint)1000000,
-				"bitrate-limit", (gfloat)1.0f,
-				"max-bitrate", (guint)0,
-				"max-video-width", (guint)0,
-				"max-video-height", (guint)0,
-				NULL);
-			eDebug("[eServiceMP3] DASH high-quality selection enabled (connection-speed=1000000 kbps)");
-		}
 		else if (g_str_has_prefix(elementname, "uridecodebin")
 			|| g_str_has_prefix(elementname, "decodebin"))
 		{
-			/* Listen for nested queue2 / DASH demux elements as well. */
-			g_signal_connect(element, "element-added", G_CALLBACK(handleElementAdded), user_data);
+			/*
+			 * Listen for queue2 element added to uridecodebin/decodebin2 as well.
+			 * Ignore other bins since they may have unrelated queues
+			 */
+				g_signal_connect(element, "element-added", G_CALLBACK(handleElementAdded), user_data);
 		}
 		g_free(elementname);
 	}
