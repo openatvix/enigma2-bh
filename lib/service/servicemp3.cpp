@@ -501,12 +501,33 @@ struct EAC3AtmosProbeData
 	int stream;
 	guint buffers;
 	bool channelsReported;
-	bool inspectChannels;
+	bool inspectChannels;	/* true for DASH */
+	/* DASH: keep watching channel count and Atmos for the life of the pad.
+	 * A merged/continuous Period no longer re-creates the audio pad (and
+	 * with it this probe) when programme <-> ad audio changes, so changes
+	 * have to be tracked here, in both directions. */
+	guint lastChannels;
+	guint candidateChannels;
+	guint candidateCount;
+	bool atmosState;	/* last Atmos state reported */
+	bool atmosCandidate;
+	guint atmosCount;
 };
 
 void freeEAC3AtmosProbeData(gpointer data)
 {
 	delete static_cast<EAC3AtmosProbeData*>(data);
+}
+
+static void eac3PostElementEvent(GstPad *pad, GstStructure *event)
+{
+	GstObject *parent = gst_pad_get_parent(pad);
+	if (parent && GST_IS_ELEMENT(parent))
+		gst_element_post_message(GST_ELEMENT(parent), gst_message_new_element(parent, event));
+	else
+		gst_structure_free(event);
+	if (parent)
+		gst_object_unref(parent);
 }
 
 GstPadProbeReturn eac3AtmosProbe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
@@ -520,53 +541,88 @@ GstPadProbeReturn eac3AtmosProbe(GstPad *pad, GstPadProbeInfo *info, gpointer us
 	++probe->buffers;
 
 	GstMapInfo map;
-	bool detected = false;
+	bool detected = false;		/* non-DASH: one-shot Atmos detection */
+	bool report_channels = false;
+	bool report_atmos = false;
 	guint encoded_channels = 0;
 	if (gst_buffer_map(buffer, &map, GST_MAP_READ))
 	{
-		if (probe->inspectChannels && !probe->channelsReported)
-			encoded_channels = eac3FrameChannels(map.data, map.size);
-		detected = eac3FrameHasAtmos(map.data, map.size);
+		if (probe->inspectChannels)
+		{
+			const guint ch = eac3FrameChannels(map.data, map.size);
+			if (ch > 0)
+			{
+				/* require 3 consecutive identical frames before believing a change */
+				if (ch == probe->candidateChannels)
+					++probe->candidateCount;
+				else
+				{
+					probe->candidateChannels = ch;
+					probe->candidateCount = 1;
+				}
+				if (probe->candidateCount >= 3 && probe->candidateChannels != probe->lastChannels)
+				{
+					probe->lastChannels = probe->candidateChannels;
+					encoded_channels = probe->candidateChannels;
+					report_channels = true;
+				}
+			}
+
+			/* Atmos on/off: quick to switch on (2 frames), slower to switch
+			 * off (16 frames, about half a second) so a stray frame can't flip it */
+			const bool atmos_now = eac3FrameHasAtmos(map.data, map.size);
+			if (atmos_now == probe->atmosCandidate)
+			{
+				if (probe->atmosCount < 1000)
+					++probe->atmosCount;
+			}
+			else
+			{
+				probe->atmosCandidate = atmos_now;
+				probe->atmosCount = 1;
+			}
+			if (probe->atmosCandidate != probe->atmosState &&
+				probe->atmosCount >= (probe->atmosCandidate ? 2u : 16u))
+			{
+				probe->atmosState = probe->atmosCandidate;
+				report_atmos = true;
+			}
+		}
+		else
+			detected = eac3FrameHasAtmos(map.data, map.size);
 		gst_buffer_unmap(buffer, &map);
 	}
 
-	if (encoded_channels > 0)
+	if (report_channels && encoded_channels > 0)
 	{
 		probe->channelsReported = true;
-		GstObject *parent = gst_pad_get_parent(pad);
-		if (parent && GST_IS_ELEMENT(parent))
-		{
-			GstStructure *event = gst_structure_new("eventAudioChannelsDetected",
-				"stream", G_TYPE_INT, probe->stream,
-				"channels", G_TYPE_INT, (gint)encoded_channels,
-				NULL);
-			gst_element_post_message(GST_ELEMENT(parent),
-				gst_message_new_element(parent, event));
-		}
-		if (parent)
-			gst_object_unref(parent);
+		eac3PostElementEvent(pad, gst_structure_new("eventAudioChannelsDetected",
+			"stream", G_TYPE_INT, probe->stream,
+			"channels", G_TYPE_INT, (gint)encoded_channels,
+			NULL));
+	}
+
+	if (report_atmos)
+	{
+		eDebug("[eServiceMP3] E-AC3 Atmos/JOC %s on audio stream %d",
+			probe->atmosState ? "started" : "ended", probe->stream);
+		eac3PostElementEvent(pad, gst_structure_new("eventAtmosDetected",
+			"stream", G_TYPE_INT, probe->stream,
+			"present", G_TYPE_INT, probe->atmosState ? 1 : 0,
+			NULL));
 	}
 
 	if (detected)
 	{
 		eDebug("[eServiceMP3] E-AC3 Atmos/JOC detected on audio stream %d", probe->stream);
-
-		GstObject *parent = gst_pad_get_parent(pad);
-		if (parent && GST_IS_ELEMENT(parent))
-		{
-			GstStructure *event = gst_structure_new("eventAtmosDetected",
-				"stream", G_TYPE_INT, probe->stream,
-				NULL);
-			gst_element_post_message(GST_ELEMENT(parent),
-				gst_message_new_element(parent, event));
-		}
-		if (parent)
-			gst_object_unref(parent);
-
+		eac3PostElementEvent(pad, gst_structure_new("eventAtmosDetected",
+			"stream", G_TYPE_INT, probe->stream,
+			NULL));
 		return GST_PAD_PROBE_REMOVE;
 	}
 
-	if (probe->buffers >= 64)
+	/* non-DASH keeps the original behaviour: give up after 64 buffers */
+	if (!probe->inspectChannels && probe->buffers >= 64)
 		return GST_PAD_PROBE_REMOVE;
 
 	return GST_PAD_PROBE_OK;
@@ -2194,8 +2250,9 @@ eServiceMP3::eServiceMP3(eServiceReference ref):
 		if ( m_sourceinfo.is_streaming )
 		{
 			g_signal_connect (G_OBJECT (m_gst_playbin), "notify::source", G_CALLBACK (playbinNotifySource), this);
-			if (!m_clearkeys.empty())
-				g_signal_connect(G_OBJECT(m_gst_playbin), "deep-element-added", G_CALLBACK(handleDeepElementAdded), this);
+			/* always hooked now: besides handing clearkeys to cencdec it also
+			 * strips SCTE-35 / emsg ad-marker handling out of the pipeline */
+			g_signal_connect(G_OBJECT(m_gst_playbin), "deep-element-added", G_CALLBACK(handleDeepElementAdded), this);
 			if (m_download_buffer_path != "")
 			{
 				/* use progressive download buffering */
@@ -5458,7 +5515,7 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 					{
 						g_object_set_qdata(G_OBJECT(pad), eac3AtmosProbeQuark(), GUINT_TO_POINTER(1));
 						gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, eac3AtmosProbe,
-							new EAC3AtmosProbeData{i, 0, false, m_sourceinfo.is_dash}, freeEAC3AtmosProbeData);
+							new EAC3AtmosProbeData{i, 0, false, m_sourceinfo.is_dash, 0, 0, 0, false, false, 0}, freeEAC3AtmosProbeData);
 					}
 
 					if ((!strcmp(g_type, "audio/x-dts") || !strcmp(g_type, "audio/dts")) &&
@@ -5881,14 +5938,25 @@ void eServiceMP3::gstBusCall(GstMessage *msg)
 						}
 						else if (!strcmp(eventname, "eventAtmosDetected"))
 						{
-							int stream = -1;
+							int stream = -1, present = 1;
+							gst_structure_get_int(msgstruct, "present", &present);
 							if (gst_structure_get_int(msgstruct, "stream", &stream) &&
-								stream >= 0 && stream < (int)m_audioStreams.size() &&
-								m_audioStreams[stream].codec != "Dolby Atmos")
+								stream >= 0 && stream < (int)m_audioStreams.size())
 							{
-								m_audioStreams[stream].codec = "Dolby Atmos";
-								eDebug("[eServiceMP3] audio stream=%d updated codec=Dolby Atmos", stream);
-								m_event((iPlayableService*)this, evUpdatedInfo);
+								if (present && m_audioStreams[stream].codec != "Dolby Atmos")
+								{
+									m_audioStreams[stream].codec = "Dolby Atmos";
+									eDebug("[eServiceMP3] audio stream=%d updated codec=Dolby Atmos", stream);
+									m_event((iPlayableService*)this, evUpdatedInfo);
+								}
+								else if (!present && m_sourceinfo.is_dash &&
+									m_audioStreams[stream].codec == "Dolby Atmos")
+								{
+									/* DASH: Atmos ended (e.g. programme -> ad), revert the label */
+									m_audioStreams[stream].codec = "Dolby Digital +";
+									eDebug("[eServiceMP3] audio stream=%d updated codec=Dolby Digital + (Atmos ended)", stream);
+									m_event((iPlayableService*)this, evUpdatedInfo);
+								}
 							}
 						}
 						else if (!strcmp(eventname, "eventAudioChannelsDetected"))
@@ -6017,9 +6085,12 @@ void eServiceMP3::handleMessage(GstMessage *msg)
 	m_pump.send(new GstMessageContainer(1, msg, NULL, NULL));
 }
 
+static bool isAdMarkerStructure(const GstStructure *s);
 GstBusSyncReply eServiceMP3::gstBusSyncHandler(GstBus *bus, GstMessage *message, gpointer user_data)
 {
 	eServiceMP3 *_this = (eServiceMP3*)user_data;
+	if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ELEMENT && isAdMarkerStructure(gst_message_get_structure(message)))
+		return GST_BUS_DROP; /* SCTE-35 section / emsg message: ignored */
 	if (_this) _this->handleMessage(message);
 	return GST_BUS_DROP;
 }
@@ -6166,11 +6237,108 @@ void eServiceMP3::playbinNotifySource(GObject *object, GParamSpec *unused, gpoin
 	}
 }
 
+/* ---- SCTE-35 / emsg ad-marker suppression -------------------------------
+ * We never act on ad markers, so anything that carries them is thrown away
+ * before it can reach an element that mishandles it (cencdec, the demuxers,
+ * the dvb sinks). */
+static bool isAdMarkerStructure(const GstStructure *s)
+{
+	const gchar *n = s ? gst_structure_get_name(s) : NULL;
+	return n && (strcasestr(n, "scte") || strcasestr(n, "emsg") ||
+		strcasestr(n, "splice") || strcasestr(n, "mpegts-section") ||
+		strcasestr(n, "cue-out") || strcasestr(n, "cue-in") || strcasestr(n, "daterange"));
+}
+
+static GstPadProbeReturn dropAdMarkerEventProbe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+	GstEvent *ev = GST_PAD_PROBE_INFO_EVENT(info);
+	if (!ev)
+		return GST_PAD_PROBE_OK;
+	switch (GST_EVENT_TYPE(ev))
+	{
+		case GST_EVENT_CUSTOM_DOWNSTREAM:
+		case GST_EVENT_CUSTOM_DOWNSTREAM_STICKY:
+		case GST_EVENT_CUSTOM_DOWNSTREAM_OOB:
+		case GST_EVENT_CUSTOM_BOTH:
+		case GST_EVENT_CUSTOM_BOTH_OOB:
+			if (isAdMarkerStructure(gst_event_get_structure(ev)))
+			{
+				eDebug("[eServiceMP3] dropped ad-marker event '%s' on %s:%s",
+					gst_structure_get_name(gst_event_get_structure(ev)),
+					GST_DEBUG_PAD_NAME(pad));
+				return GST_PAD_PROBE_DROP;
+			}
+			break;
+		default:
+			break;
+	}
+	return GST_PAD_PROBE_OK;
+}
+
+static void attachAdMarkerProbe(GstPad *pad)
+{
+	if (!pad)
+		return;
+	gst_pad_add_probe(pad, (GstPadProbeType)(GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM | GST_PAD_PROBE_TYPE_EVENT_BOTH),
+		dropAdMarkerEventProbe, NULL, NULL);
+}
+
+static void adMarkerPadAdded(GstElement *element, GstPad *pad, gpointer user_data)
+{
+	attachAdMarkerProbe(pad);
+}
+
+static void stripAdMarkersFromElement(GstElement *element, const char *fname)
+{
+	static const char *const demuxers[] = {
+		"dashdemux", "dashdemux2", "hlsdemux", "hlsdemux2", "adaptivedemux",
+		"tsdemux", "qtdemux", "cencdec", NULL };
+	bool match = false;
+	for (int i = 0; demuxers[i]; i++)
+		if (!strcmp(fname, demuxers[i])) { match = true; break; }
+	if (!match)
+		return;
+
+	/* tsdemux can forward SCTE-35 sections downstream - make sure it doesn't */
+	if (!strcmp(fname, "tsdemux") &&
+		g_object_class_find_property(G_OBJECT_GET_CLASS(element), "send-scte35-events"))
+		g_object_set(G_OBJECT(element), "send-scte35-events", FALSE, NULL);
+
+	/* existing pads (cencdec/qtdemux/tsdemux have static ones) ... */
+	GstIterator *it = gst_element_iterate_pads(element);
+	GValue v = G_VALUE_INIT;
+	bool done = false;
+	while (!done)
+	{
+		switch (gst_iterator_next(it, &v))
+		{
+			case GST_ITERATOR_OK:
+				attachAdMarkerProbe(GST_PAD(g_value_get_object(&v)));
+				g_value_reset(&v);
+				break;
+			case GST_ITERATOR_RESYNC:
+				gst_iterator_resync(it);
+				break;
+			default:
+				done = true;
+				break;
+		}
+	}
+	g_value_unset(&v);
+	gst_iterator_free(it);
+	/* ... and the ones that appear later (dashdemux/hlsdemux/tsdemux src pads) */
+	g_signal_connect(element, "pad-added", G_CALLBACK(adMarkerPadAdded), NULL);
+	eDebug("[eServiceMP3] ad-marker (SCTE-35) filter installed on %s", fname);
+}
+
 void eServiceMP3::handleDeepElementAdded(GstBin *bin, GstBin *sub_bin, GstElement *element, gpointer user_data)
 {
 	eServiceMP3 *_this = (eServiceMP3*)user_data;
 	GstElementFactory *factory = gst_element_get_factory(element);
-	if (!_this || !factory || _this->m_clearkeys.empty())
+	if (!_this || !factory)
+		return;
+	stripAdMarkersFromElement(element, gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)));
+	if (_this->m_clearkeys.empty())
 		return;
 	if (strcmp(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)), "cencdec") != 0)
 		return;
